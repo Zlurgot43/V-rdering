@@ -14,8 +14,7 @@ app.add_middleware(
 )
 
 FMP_KEY = os.environ.get("FMP_API_KEY", "demo")
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
-
+FMP_BASE = "https://financialmodelingprep.com/stable"
 
 def fmp(path: str, params: dict = {}) -> dict | list:
     params["apikey"] = FMP_KEY
