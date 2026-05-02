@@ -16,8 +16,9 @@ app.add_middleware(
 FMP_KEY = os.environ.get("FMP_API_KEY", "demo")
 FMP_BASE = "https://financialmodelingprep.com/stable"
 
-def fmp(path: str, params: dict = {}) -> dict | list:
-    params["apikey"] = FMP_KEY
+
+def fmp(path: str, extra: dict = {}) -> dict | list:
+    params = {"apikey": FMP_KEY, **extra}
     r = requests.get(f"{FMP_BASE}{path}", params=params, timeout=15)
     r.raise_for_status()
     return r.json()
@@ -36,40 +37,41 @@ def safe(val, default=None):
 def fetch_data(ticker: str) -> dict:
     ticker = ticker.upper()
 
-    quote_data = fmp(f"/quote/{ticker}")
+    # Stable API uses ?symbol= instead of /{ticker}
+    quote_data = fmp("/quote", {"symbol": ticker})
     if not quote_data or isinstance(quote_data, dict):
         raise ValueError(f"Ingen data för {ticker}")
-    q = quote_data[0]
+    q = quote_data[0] if isinstance(quote_data, list) else quote_data
 
     try:
-        ratios_data = fmp(f"/ratios-ttm/{ticker}")
-        ratios = ratios_data[0] if ratios_data else {}
-    except Exception:
-        ratios = {}
-
-    try:
-        profile_data = fmp(f"/profile/{ticker}")
-        profile = profile_data[0] if profile_data else {}
+        profile_data = fmp("/profile", {"symbol": ticker})
+        profile = profile_data[0] if isinstance(profile_data, list) and profile_data else {}
     except Exception:
         profile = {}
 
     try:
-        cf_data = fmp(f"/cash-flow-statement/{ticker}", {"limit": 1})
-        cf = cf_data[0] if cf_data else {}
+        cf_data = fmp("/cash-flow-statement", {"symbol": ticker, "limit": 1})
+        cf = cf_data[0] if isinstance(cf_data, list) and cf_data else {}
     except Exception:
         cf = {}
 
     try:
-        bs_data = fmp(f"/balance-sheet-statement/{ticker}", {"limit": 1})
-        bs = bs_data[0] if bs_data else {}
+        bs_data = fmp("/balance-sheet-statement", {"symbol": ticker, "limit": 1})
+        bs = bs_data[0] if isinstance(bs_data, list) and bs_data else {}
     except Exception:
         bs = {}
 
     try:
-        is_data = fmp(f"/income-statement/{ticker}", {"limit": 1})
-        inc = is_data[0] if is_data else {}
+        is_data = fmp("/income-statement", {"symbol": ticker, "limit": 1})
+        inc = is_data[0] if isinstance(is_data, list) and is_data else {}
     except Exception:
         inc = {}
+
+    try:
+        ratios_data = fmp("/ratios-ttm", {"symbol": ticker})
+        ratios = ratios_data[0] if isinstance(ratios_data, list) and ratios_data else {}
+    except Exception:
+        ratios = {}
 
     price      = safe(q.get("price"))
     market_cap = safe(q.get("marketCap"))
@@ -77,7 +79,7 @@ def fetch_data(ticker: str) -> dict:
     eps        = safe(q.get("eps"))
 
     book_value_total = safe(bs.get("totalStockholdersEquity"))
-    book_value = (book_value_total / shares) if book_value_total and shares else safe(ratios.get("bookValuePerShareTTM"))
+    book_value = (book_value_total / shares) if (book_value_total and shares and shares > 0) else safe(ratios.get("bookValuePerShareTTM"))
 
     total_debt = safe(bs.get("totalDebt"))
     cash       = safe(bs.get("cashAndCashEquivalents"))
@@ -93,12 +95,12 @@ def fetch_data(ticker: str) -> dict:
     elif market_cap:
         enterprise_value = market_cap
 
-    beta       = safe(profile.get("beta"), 1.0)
-    sector     = profile.get("sector") or "Okänd"
-    industry   = profile.get("industry") or "Okänd"
-    name       = profile.get("companyName") or q.get("name") or ticker
-    currency   = profile.get("currency") or "USD"
-    country    = profile.get("country") or ""
+    beta      = safe(profile.get("beta"), 1.0)
+    sector    = profile.get("sector") or "Okänd"
+    industry  = profile.get("industry") or "Okänd"
+    name      = profile.get("companyName") or q.get("name") or ticker
+    currency  = profile.get("currency") or "USD"
+    country   = profile.get("country") or ""
     forward_pe = safe(ratios.get("priceEarningsRatioTTM"))
     growth_5y  = safe(ratios.get("revenueGrowthTTM"), 0.08)
 
