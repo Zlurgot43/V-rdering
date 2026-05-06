@@ -6,6 +6,9 @@ app = FastAPI(title="Värderingsmotor API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 TD_KEY   = os.environ.get("TWELVE_DATA_KEY", "")
+@app.get("/debug")
+def debug():
+    return {"key_set": bool(TD_KEY), "key_preview": TD_KEY[:6] + "..." if TD_KEY else "TOM"}
 TD_BASE  = "https://api.twelvedata.com"
 _cache   = {}
 CACHE_TTL = 300
