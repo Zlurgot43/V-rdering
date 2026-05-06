@@ -5,9 +5,10 @@ import math, os, json, time, requests
 app = FastAPI(title="Värderingsmotor API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Cache för att undvika för många anrop
-_cache = {}
-CACHE_TTL = 300  # 5 minuter
+TD_KEY   = os.environ.get("TWELVE_DATA_KEY", "")
+TD_BASE  = "https://api.twelvedata.com"
+_cache   = {}
+CACHE_TTL = 300
 
 def safe(val, default=None):
     try:
@@ -24,98 +25,74 @@ def upside_pct(fair, price):
     if fair and price: return round(((fair - price) / price) * 100, 1)
     return None
 
-# Headers som efterliknar en webbläsare – undviker Yahoo-blockering
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Origin": "https://finance.yahoo.com",
-    "Referer": "https://finance.yahoo.com/",
-}
+def td(path, params={}):
+    """Anropar Twelve Data API."""
+    r = requests.get(f"{TD_BASE}{path}", params={"apikey": TD_KEY, **params}, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") == "error":
+        raise ValueError(data.get("message", "Okänt fel från Twelve Data"))
+    return data
 
-def yahoo_fetch(ticker: str) -> dict:
-    """Hämtar data direkt från Yahoo Finance JSON-API med browser-headers."""
+def fetch_data(ticker: str) -> dict:
     ticker = ticker.upper()
-
-    # Kolla cache
     if ticker in _cache:
         ts, data = _cache[ticker]
         if time.time() - ts < CACHE_TTL:
             return data
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    # Hämta realtidskurs
+    quote = td("/quote", {"symbol": ticker})
+    price      = safe(quote.get("close") or quote.get("price"))
+    name       = quote.get("name") or ticker
+    currency   = quote.get("currency") or "USD"
+    exchange   = quote.get("exchange") or ""
 
-    # Steg 1: Hämta crumb (krävs av Yahoo sedan 2023)
-    crumb_url = "https://query2.finance.yahoo.com/v1/test/getcrumb"
+    # Hämta statistik (EPS, book value, market cap, beta m.m.)
     try:
-        cr = session.get(crumb_url, timeout=10)
-        crumb = cr.text.strip()
+        stats = td("/statistics", {"symbol": ticker})
+        valuation  = stats.get("valuations_metrics", {})
+        fin_stats  = stats.get("financials", {})
+        inc_stmt   = stats.get("income_statement", {})
+        balance    = stats.get("balance_sheet", {})
+        cash_flow  = stats.get("cash_flow", {})
+        stock_stat = stats.get("stock_price_summary", {})
+        company    = stats.get("company_summary", {})
     except:
-        crumb = ""
+        valuation = fin_stats = inc_stmt = balance = cash_flow = stock_stat = company = {}
 
-    # Steg 2: Hämta quoteSummary med alla moduler
-    modules = "price,summaryDetail,financialData,defaultKeyStatistics,incomeStatementHistory,cashflowStatementHistory,balanceSheetHistory"
-    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-    params = {"modules": modules, "crumb": crumb, "formatted": "false"}
+    # Bolagsinfo
+    sector   = company.get("sector") or "Okänd"
+    industry = company.get("industry") or "Okänd"
+    country  = company.get("country") or ""
 
-    resp = session.get(url, params=params, timeout=15)
-    if resp.status_code != 200:
-        raise ValueError(f"Yahoo svarade med {resp.status_code} för {ticker}")
+    # Nyckeltal
+    market_cap = safe(valuation.get("market_capitalization"))
+    eps        = safe(fin_stats.get("diluted_eps_ttm"))
+    book_value = safe(fin_stats.get("book_value_per_share_mrq"))
+    beta       = safe(stock_stat.get("beta")) or 1.0
+    forward_pe = safe(valuation.get("forward_pe"))
 
-    result = resp.json().get("quoteSummary", {}).get("result", [])
-    if not result:
-        raise ValueError(f"Ingen data för {ticker}")
+    # Resultaträkning
+    revenue    = safe(inc_stmt.get("total_revenue_ttm"))
+    net_income = safe(inc_stmt.get("net_income_ttm"))
+    ebitda     = safe(inc_stmt.get("ebitda_ttm"))
+    gross_profit = safe(inc_stmt.get("gross_profit_ttm"))
 
-    d = result[0]
-    price_data = d.get("price", {})
-    fin_data   = d.get("financialData", {})
-    key_stats  = d.get("defaultKeyStatistics", {})
-    summary    = d.get("summaryDetail", {})
+    # Balansräkning
+    total_debt = safe(balance.get("total_debt_mrq"))
+    cash       = safe(balance.get("total_cash_mrq"))
+    shares     = safe(fin_stats.get("shares_outstanding"))
 
-    # Hämta från income statement (TTM)
-    inc_stmts = d.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
-    inc = inc_stmts[0] if inc_stmts else {}
+    # Kassaflöde
+    fcf   = safe(cash_flow.get("levered_free_cash_flow_ttm"))
+    op_cf = safe(cash_flow.get("operating_cash_flow_ttm"))
 
-    # Hämta från cashflow (TTM)
-    cf_stmts = d.get("cashflowStatementHistory", {}).get("cashflowStatements", [])
-    cf = cf_stmts[0] if cf_stmts else {}
-
-    # Hämta från balance sheet
-    bs_stmts = d.get("balanceSheetHistory", {}).get("balanceSheetStatements", [])
-    bs = bs_stmts[0] if bs_stmts else {}
-
-    def g(obj, key):
-        """Hämtar råvärde från Yahoo-objekt (hanterar både {raw: x} och direktvärde)."""
-        v = obj.get(key)
-        if isinstance(v, dict): return safe(v.get("raw"))
-        return safe(v)
-
-    price      = g(price_data, "regularMarketPrice")
-    market_cap = g(price_data, "marketCap")
-    shares     = g(key_stats, "sharesOutstanding")
-    eps        = g(key_stats, "trailingEps")
-    book_value = g(key_stats, "bookValue")
-    beta       = g(key_stats, "beta") or 1.0
-    forward_pe = g(key_stats, "forwardPE")
-
-    revenue    = g(inc, "totalRevenue")
-    net_income = g(inc, "netIncome")
-    ebitda     = g(fin_data, "ebitda")
-    gross_profit = g(inc, "grossProfit")
-
-    fcf        = g(fin_data, "freeCashflow")
-    op_cf      = g(cf, "totalCashFromOperatingActivities")
-
-    total_debt = g(fin_data, "totalDebt")
-    cash       = g(fin_data, "totalCash")
-
-    roe        = g(fin_data, "returnOnEquity")
-    roa        = g(fin_data, "returnOnAssets")
-    net_margin = g(fin_data, "profitMargins")
-    gross_margin = g(fin_data, "grossMargins")
-    growth     = g(fin_data, "revenueGrowth") or 0.05
+    # Marginaler & tillväxt
+    net_margin   = safe(fin_stats.get("profit_margin"))
+    gross_margin = safe(fin_stats.get("gross_profit_margin"))
+    roe          = safe(fin_stats.get("return_on_equity_ttm"))
+    growth       = safe(fin_stats.get("quarterly_revenue_growth_yoy")) or 0.05
 
     ev = None
     if market_cap and total_debt and cash:
@@ -123,24 +100,17 @@ def yahoo_fetch(ticker: str) -> dict:
     elif market_cap:
         ev = market_cap
 
-    sector   = price_data.get("sector") or d.get("summaryProfile", {}).get("sector") or "Okänd"
-    industry = price_data.get("industry") or d.get("summaryProfile", {}).get("industry") or "Okänd"
-    name     = price_data.get("longName") or price_data.get("shortName") or ticker
-    currency = price_data.get("currency") or "USD"
-    country  = d.get("summaryProfile", {}).get("country") or ""
-
-    result_dict = dict(
+    result = dict(
         ticker=ticker, name=name, sector=sector, industry=industry,
         currency=currency, country=country, price=price, market_cap=market_cap,
         enterprise_value=ev, eps=eps, revenue=revenue, net_income=net_income,
         ebitda=ebitda, gross_profit=gross_profit, book_value=book_value,
         total_debt=total_debt, cash=cash, shares=shares, fcf=fcf, op_cf=op_cf,
         beta=beta, growth_5y=growth, forward_pe=forward_pe,
-        roe=roe, roa=roa, net_margin=net_margin, gross_margin=gross_margin,
+        roe=roe, net_margin=net_margin, gross_margin=gross_margin,
     )
-
-    _cache[ticker] = (time.time(), result_dict)
-    return result_dict
+    _cache[ticker] = (time.time(), result)
+    return result
 
 # ── SEKTORSSNITT ──────────────────────────────────────────────────────────────
 SECTOR_PE = {"Technology":28,"Healthcare":22,"Financial Services":14,"Consumer Cyclical":20,"Consumer Defensive":18,"Energy":12,"Utilities":16,"Industrials":18,"Basic Materials":14,"Real Estate":30,"Communication Services":22}
@@ -216,9 +186,9 @@ def model_peer_relative(subject, peers_data):
     if not peers_data: return {"available":False,"reason":"Inga peer-data tillgängliga"}
     pe_m, pb_m, ev_m = [], [], []
     for p in peers_data:
-        if p.get("eps") and p.get("price") and p["eps"] > 0: pe_m.append(p["price"]/p["eps"])
-        if p.get("book_value") and p.get("price") and p["book_value"] > 0: pb_m.append(p["price"]/p["book_value"])
-        if p.get("ebitda") and p.get("enterprise_value") and p["ebitda"] > 0: ev_m.append(p["enterprise_value"]/p["ebitda"])
+        if p.get("eps") and p.get("price") and p["eps"]>0: pe_m.append(p["price"]/p["eps"])
+        if p.get("book_value") and p.get("price") and p["book_value"]>0: pb_m.append(p["price"]/p["book_value"])
+        if p.get("ebitda") and p.get("enterprise_value") and p["ebitda"]>0: ev_m.append(p["enterprise_value"]/p["ebitda"])
     def median(lst):
         if not lst: return None
         s=sorted(lst); n=len(s)
@@ -257,11 +227,11 @@ def build_summary(price, models):
 
 def identify_peers(company: dict):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key: return [], "AI-peer-identifiering ej aktiverad"
+    if not api_key: return [], "AI-peer-identifiering ej aktiverad (ANTHROPIC_API_KEY saknas)"
     mc_str = f"${company['market_cap']/1e9:.0f}B" if company.get("market_cap") else "okänt"
     prompt = f"""Du är en senior aktieanalytiker. Identifiera 4 börsnoterade peer-bolag för:
 Bolag: {company['name']} ({company['ticker']}), Sektor: {company['sector']}, Industri: {company['industry']}, Land: {company['country']}, Börsvärde: {mc_str}
-Välj peers med liknande affärsmodell och storlek. Använd korrekta börstickers (t.ex. VOLV-B.ST för svenska bolag).
+Välj peers med liknande affärsmodell och storlek. Använd korrekta börstickers.
 Returnera ENBART JSON: {{"peers": ["T1","T2","T3","T4"], "reasoning": "En mening"}}"""
     try:
         resp = requests.post("https://api.anthropic.com/v1/messages",
@@ -281,7 +251,7 @@ def root():
 
 @app.get("/value/{ticker}")
 def value_stock(ticker: str):
-    try: d = yahoo_fetch(ticker.upper())
+    try: d = fetch_data(ticker.upper())
     except Exception as e: raise HTTPException(400, f"Kunde inte hämta data för {ticker}: {e}")
     if not d["price"]: raise HTTPException(404, f"Ingen kursinformation för {ticker}")
     pe_r=model_pe(d); pb_r=model_pb(d); ev_r=model_ev_ebitda(d)
@@ -295,29 +265,25 @@ def value_stock(ticker: str):
 
 @app.get("/value-with-peers/{ticker}")
 def value_with_peers(ticker: str):
-    try: d = yahoo_fetch(ticker.upper())
+    try: d = fetch_data(ticker.upper())
     except Exception as e: raise HTTPException(400, f"Kunde inte hämta data för {ticker}: {e}")
     if not d["price"]: raise HTTPException(404, f"Ingen kursinformation för {ticker}")
-
     peer_tickers, peer_reasoning = identify_peers(d)
     peers_data, peer_errors = [], []
     for pt in peer_tickers:
         try:
-            pd = yahoo_fetch(pt)
+            pd = fetch_data(pt)
             if pd.get("price"): peers_data.append(pd)
         except Exception as e: peer_errors.append(f"{pt}: {e}")
-
     pe_r=model_pe(d); pb_r=model_pb(d); ev_r=model_ev_ebitda(d)
     dcf_r=model_dcf(d); gr_r=model_graham(d); rel_r=model_peer_relative(d,peers_data)
     all_m=[pe_r,pb_r,ev_r,dcf_r,gr_r,rel_r]
-
     peer_summary=[{
         "ticker":p["ticker"],"name":p["name"],"price":p["price"],"currency":p["currency"],
         "pe":round(p["price"]/p["eps"],1) if p.get("eps") and p["eps"]>0 else None,
         "pb":round(p["price"]/p["book_value"],1) if p.get("book_value") and p["book_value"]>0 else None,
         "ev_ebitda":round(p["enterprise_value"]/p["ebitda"],1) if p.get("ebitda") and p["ebitda"]>0 and p.get("enterprise_value") else None,
     } for p in peers_data]
-
     return {
         "company":{"ticker":d["ticker"],"name":d["name"],"sector":d["sector"],"industry":d["industry"],"country":d["country"],"currency":d["currency"],"current_price":d["price"],"market_cap":d["market_cap"]},
         "key_metrics":{"roe":d.get("roe"),"net_margin":d.get("net_margin"),"gross_margin":d.get("gross_margin"),"revenue_growth":d.get("growth_5y"),"beta":d.get("beta")},
@@ -333,7 +299,7 @@ def compare_stocks(tickers: str):
     results=[]
     for t in ticker_list:
         try:
-            d=yahoo_fetch(t)
+            d=fetch_data(t)
             pe_r=model_pe(d);pb_r=model_pb(d);ev_r=model_ev_ebitda(d);dcf_r=model_dcf(d);gr_r=model_graham(d)
             results.append({"ticker":t,"name":d["name"],"sector":d["sector"],"current_price":d["price"],"currency":d["currency"],"summary":build_summary(d["price"],[pe_r,pb_r,ev_r,dcf_r,gr_r]),"models":{"pe":pe_r,"pb":pb_r,"ev_ebitda":ev_r,"dcf":dcf_r,"graham":gr_r}})
         except Exception as e: results.append({"ticker":t,"error":str(e)})
