@@ -10,7 +10,7 @@ _cache   = {}
 CACHE_TTL = 300
 
 def get_td_key():
-    return os.environ.get("TWELVE_DATA_KEY", "")
+    return os.environ.get("TWELVE_DATA_KEY", "fa13988488f6419288401068a898cc92")
 
 def safe(val, default=None):
     try:
