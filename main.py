@@ -5,11 +5,11 @@ import math, os, json, time, requests
 app = FastAPI(title="Värderingsmotor API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-TD_BASE  = "https://api.twelvedata.com"
-_cache   = {}
+TD_BASE = "https://api.twelvedata.com"
+_cache  = {}
 CACHE_TTL = 300
 
-def get_td_key():
+def get_key():
     return os.environ.get("TWELVE_DATA_KEY", "fa13988488f6419288401068a898cc92")
 
 def safe(val, default=None):
@@ -27,12 +27,12 @@ def upside_pct(fair, price):
     if fair and price: return round(((fair - price) / price) * 100, 1)
     return None
 
-def td(path, params={}):
-    r = requests.get(f"{TD_BASE}{path}", params={"apikey": get_td_key(), **params}, timeout=15)
+def td_get(path, params={}):
+    r = requests.get(f"{TD_BASE}{path}", params={"apikey": get_key(), **params}, timeout=15)
     r.raise_for_status()
     data = r.json()
-    if data.get("status") == "error":
-        raise ValueError(data.get("message", "Okänt fel från Twelve Data"))
+    if isinstance(data, dict) and data.get("status") == "error":
+        raise ValueError(data.get("message", "Twelve Data fel"))
     return data
 
 def fetch_data(ticker: str) -> dict:
@@ -42,45 +42,50 @@ def fetch_data(ticker: str) -> dict:
         if time.time() - ts < CACHE_TTL:
             return data
 
-    quote = td("/quote", {"symbol": ticker})
-    price      = safe(quote.get("close") or quote.get("price"))
-    name       = quote.get("name") or ticker
-    currency   = quote.get("currency") or "USD"
+    # Hämta kurs
+    quote = td_get("/quote", {"symbol": ticker})
+    price    = safe(quote.get("close")) or safe(quote.get("price"))
+    name     = quote.get("name") or ticker
+    currency = quote.get("currency") or "USD"
 
+    # Hämta statistik
     try:
-        stats = td("/statistics", {"symbol": ticker})
-        valuation  = stats.get("valuations_metrics", {})
-        fin_stats  = stats.get("financials", {})
-        inc_stmt   = stats.get("income_statement", {})
-        balance    = stats.get("balance_sheet", {})
-        cash_flow  = stats.get("cash_flow", {})
-        stock_stat = stats.get("stock_price_summary", {})
-        company    = stats.get("company_summary", {})
+        stats = td_get("/statistics", {"symbol": ticker})
     except:
-        valuation = fin_stats = inc_stmt = balance = cash_flow = stock_stat = company = {}
+        stats = {}
 
-    sector   = company.get("sector") or "Okänd"
-    industry = company.get("industry") or "Okänd"
-    country  = company.get("country") or ""
+    # Twelve Data statistik-struktur
+    vs  = stats.get("statistics", {})
+    val = vs.get("valuations_metrics", {})
+    fin = vs.get("financials", {})
+    inc = fin.get("income_statement", {})
+    bal = fin.get("balance_sheet", {})
+    cf  = fin.get("cash_flow", {})
+    sp  = vs.get("stock_price_summary", {})
+    co  = stats.get("company", {})
 
-    market_cap = safe(valuation.get("market_capitalization"))
-    eps        = safe(fin_stats.get("diluted_eps_ttm"))
-    book_value = safe(fin_stats.get("book_value_per_share_mrq"))
-    beta       = safe(stock_stat.get("beta")) or 1.0
-    forward_pe = safe(valuation.get("forward_pe"))
-    revenue    = safe(inc_stmt.get("total_revenue_ttm"))
-    net_income = safe(inc_stmt.get("net_income_ttm"))
-    ebitda     = safe(inc_stmt.get("ebitda_ttm"))
-    gross_profit = safe(inc_stmt.get("gross_profit_ttm"))
-    total_debt = safe(balance.get("total_debt_mrq"))
-    cash       = safe(balance.get("total_cash_mrq"))
-    shares     = safe(fin_stats.get("shares_outstanding"))
-    fcf        = safe(cash_flow.get("levered_free_cash_flow_ttm"))
-    op_cf      = safe(cash_flow.get("operating_cash_flow_ttm"))
-    net_margin   = safe(fin_stats.get("profit_margin"))
-    gross_margin = safe(fin_stats.get("gross_profit_margin"))
-    roe          = safe(fin_stats.get("return_on_equity_ttm"))
-    growth       = safe(fin_stats.get("quarterly_revenue_growth_yoy")) or 0.05
+    sector   = co.get("sector") or "Okänd"
+    industry = co.get("industry") or "Okänd"
+    country  = co.get("country") or ""
+
+    market_cap   = safe(val.get("market_capitalization"))
+    eps          = safe(fin.get("diluted_eps_ttm"))
+    book_value   = safe(fin.get("book_value_per_share_mrq"))
+    beta         = safe(sp.get("beta")) or 1.0
+    forward_pe   = safe(val.get("forward_pe"))
+    revenue      = safe(inc.get("total_revenue_ttm"))
+    net_income   = safe(inc.get("net_income_ttm"))
+    ebitda       = safe(inc.get("ebitda_ttm"))
+    gross_profit = safe(inc.get("gross_profit_ttm"))
+    total_debt   = safe(bal.get("total_debt_mrq"))
+    cash         = safe(bal.get("total_cash_mrq"))
+    shares       = safe(fin.get("shares_outstanding"))
+    fcf          = safe(cf.get("levered_free_cash_flow_ttm"))
+    op_cf        = safe(cf.get("operating_cash_flow_ttm"))
+    net_margin   = safe(fin.get("profit_margin"))
+    gross_margin = safe(fin.get("gross_profit_margin"))
+    roe          = safe(fin.get("return_on_equity_ttm"))
+    growth       = safe(fin.get("quarterly_revenue_growth_yoy")) or 0.05
 
     ev = None
     if market_cap and total_debt and cash:
@@ -232,12 +237,22 @@ Returnera ENBART JSON: {{"peers": ["T1","T2","T3","T4"], "reasoning": "En mening
 
 @app.get("/")
 def root():
-    return {"status":"OK","message":"Prova /value/AAPL eller /value-with-peers/AAPL"}
+    return {"status":"OK","message":"Prova /value/AAPL eller /raw/AAPL"}
 
 @app.get("/debug")
 def debug():
-    key = get_td_key()
-    return {"key_set": bool(key), "key_preview": key[:6] + "..." if key else "TOM"}
+    key = get_key()
+    return {"key_set": bool(key), "key_length": len(key), "key_preview": key[:8] + "..." if key else "TOM"}
+
+@app.get("/raw/{ticker}")
+def raw(ticker: str):
+    """Visar rådata från Twelve Data – används för felsökning"""
+    try:
+        quote = td_get("/quote", {"symbol": ticker.upper()})
+        stats = td_get("/statistics", {"symbol": ticker.upper()})
+        return {"quote": quote, "stats": stats}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/value/{ticker}")
 def value_stock(ticker: str):
