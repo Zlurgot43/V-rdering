@@ -61,9 +61,10 @@ def fetch_data(ticker: str) -> dict:
     except:
         val = fin = inc = bal = cf = sp = ss = meta = {}
 
-    sector   = meta.get("sector") or "Okänd"
+    SECTOR_LOOKUP = {"AAPL":"Technology","MSFT":"Technology","GOOGL":"Technology","GOOG":"Technology","META":"Technology","NVDA":"Technology","AMD":"Technology","INTC":"Technology","ORCL":"Technology","CRM":"Technology","ADBE":"Technology","QCOM":"Technology","AMZN":"Consumer Cyclical","TSLA":"Consumer Cyclical","NKE":"Consumer Cyclical","MCD":"Consumer Defensive","KO":"Consumer Defensive","PG":"Consumer Defensive","WMT":"Consumer Defensive","COST":"Consumer Defensive","JPM":"Financial Services","BAC":"Financial Services","GS":"Financial Services","MS":"Financial Services","V":"Financial Services","MA":"Financial Services","JNJ":"Healthcare","PFE":"Healthcare","UNH":"Healthcare","ABBV":"Healthcare","XOM":"Energy","CVX":"Energy","COP":"Energy","CAT":"Industrials","BA":"Industrials","GE":"Industrials","HON":"Industrials","VOLV-B.ST":"Industrials","SAND.ST":"Industrials","SKF-B.ST":"Industrials","ERIC-B.ST":"Communication Services","TEL2-B.ST":"Communication Services","SEB-A.ST":"Financial Services","SHB-A.ST":"Financial Services","ESSITY-B.ST":"Consumer Defensive","HM-B.ST":"Consumer Cyclical","ATCO-A.ST":"Industrials","INVE-B.ST":"Financial Services"}
+    sector   = SECTOR_LOOKUP.get(ticker) or meta.get("sector") or "Technology"
     industry = meta.get("industry") or "Okänd"
-    country  = meta.get("country") or ""
+    country  = meta.get("country") or ("SE" if ticker.endswith(".ST") else "US")
 
     market_cap   = safe(val.get("market_capitalization"))
     enterprise_v = safe(val.get("enterprise_value"))
