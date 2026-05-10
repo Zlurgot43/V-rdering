@@ -5,8 +5,8 @@ import math, os, json, time, requests
 app = FastAPI(title="Värderingsmotor API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-TD_BASE = "https://api.twelvedata.com"
-_cache  = {}
+TD_BASE   = "https://api.twelvedata.com"
+_cache    = {}
 CACHE_TTL = 300
 
 def get_key():
@@ -42,56 +42,50 @@ def fetch_data(ticker: str) -> dict:
         if time.time() - ts < CACHE_TTL:
             return data
 
-    # Hämta kurs
     quote = td_get("/quote", {"symbol": ticker})
-    price    = safe(quote.get("close")) or safe(quote.get("price"))
+    price    = safe(quote.get("close"))
     name     = quote.get("name") or ticker
     currency = quote.get("currency") or "USD"
 
-    # Hämta statistik
     try:
-        stats = td_get("/statistics", {"symbol": ticker})
+        raw   = td_get("/statistics", {"symbol": ticker})
+        s     = raw.get("statistics", {})
+        val   = s.get("valuations_metrics", {})
+        fin   = s.get("financials", {})
+        inc   = fin.get("income_statement", {})
+        bal   = fin.get("balance_sheet", {})
+        cf    = fin.get("cash_flow", {})
+        sp    = s.get("stock_price_summary", {})
+        ss    = s.get("stock_statistics", {})
+        meta  = raw.get("meta", {})
     except:
-        stats = {}
+        val = fin = inc = bal = cf = sp = ss = meta = {}
 
-    # Twelve Data statistik-struktur
-    vs  = stats.get("statistics", {})
-    val = vs.get("valuations_metrics", {})
-    fin = vs.get("financials", {})
-    inc = fin.get("income_statement", {})
-    bal = fin.get("balance_sheet", {})
-    cf  = fin.get("cash_flow", {})
-    sp  = vs.get("stock_price_summary", {})
-    co  = stats.get("company", {})
-
-    sector   = co.get("sector") or "Okänd"
-    industry = co.get("industry") or "Okänd"
-    country  = co.get("country") or ""
+    sector   = meta.get("sector") or "Okänd"
+    industry = meta.get("industry") or "Okänd"
+    country  = meta.get("country") or ""
 
     market_cap   = safe(val.get("market_capitalization"))
-    eps          = safe(fin.get("diluted_eps_ttm"))
-    book_value   = safe(fin.get("book_value_per_share_mrq"))
+    enterprise_v = safe(val.get("enterprise_value"))
+    eps          = safe(inc.get("diluted_eps_ttm"))
+    book_value   = safe(bal.get("book_value_per_share_mrq"))
     beta         = safe(sp.get("beta")) or 1.0
     forward_pe   = safe(val.get("forward_pe"))
-    revenue      = safe(inc.get("total_revenue_ttm"))
-    net_income   = safe(inc.get("net_income_ttm"))
-    ebitda       = safe(inc.get("ebitda_ttm"))
+    revenue      = safe(inc.get("revenue_ttm"))
+    net_income   = safe(inc.get("net_income_to_common_ttm"))
+    ebitda       = safe(inc.get("ebitda"))
     gross_profit = safe(inc.get("gross_profit_ttm"))
     total_debt   = safe(bal.get("total_debt_mrq"))
     cash         = safe(bal.get("total_cash_mrq"))
-    shares       = safe(fin.get("shares_outstanding"))
+    shares       = safe(ss.get("shares_outstanding"))
     fcf          = safe(cf.get("levered_free_cash_flow_ttm"))
     op_cf        = safe(cf.get("operating_cash_flow_ttm"))
     net_margin   = safe(fin.get("profit_margin"))
-    gross_margin = safe(fin.get("gross_profit_margin"))
+    gross_margin = safe(fin.get("gross_margin"))
     roe          = safe(fin.get("return_on_equity_ttm"))
-    growth       = safe(fin.get("quarterly_revenue_growth_yoy")) or 0.05
+    growth       = safe(inc.get("quarterly_revenue_growth")) or 0.05
 
-    ev = None
-    if market_cap and total_debt and cash:
-        ev = market_cap + total_debt - cash
-    elif market_cap:
-        ev = market_cap
+    ev = enterprise_v or (market_cap + (total_debt or 0) - (cash or 0) if market_cap and total_debt and cash else market_cap)
 
     result = dict(
         ticker=ticker, name=name, sector=sector, industry=industry,
@@ -237,22 +231,12 @@ Returnera ENBART JSON: {{"peers": ["T1","T2","T3","T4"], "reasoning": "En mening
 
 @app.get("/")
 def root():
-    return {"status":"OK","message":"Prova /value/AAPL eller /raw/AAPL"}
+    return {"status":"OK","message":"Prova /value/AAPL eller /value-with-peers/AAPL"}
 
 @app.get("/debug")
 def debug():
     key = get_key()
     return {"key_set": bool(key), "key_length": len(key), "key_preview": key[:8] + "..." if key else "TOM"}
-
-@app.get("/raw/{ticker}")
-def raw(ticker: str):
-    """Visar rådata från Twelve Data – används för felsökning"""
-    try:
-        quote = td_get("/quote", {"symbol": ticker.upper()})
-        stats = td_get("/statistics", {"symbol": ticker.upper()})
-        return {"quote": quote, "stats": stats}
-    except Exception as e:
-        return {"error": str(e)}
 
 @app.get("/value/{ticker}")
 def value_stock(ticker: str):
